@@ -4,3 +4,4 @@ motor
 aiohttp
 requests
 python-multipart
+yt-dlp

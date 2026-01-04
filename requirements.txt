@@ -1,10 +1,7 @@
-fastapi
-uvicorn
-motor
-aiohttp
-requests
-python-multipart
-yt-dlp>=2023.11.16
-youtube-search-python
-pyrogram
-tgcrypto
+fastapi==0.104.1
+uvicorn==0.24.0
+motor==3.3.2
+yt-dlp==2023.11.16
+requests==2.31.0
+pymongo==4.5.0
+python-multipart==0.0.6

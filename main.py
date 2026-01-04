@@ -22,7 +22,7 @@ app = FastAPI(title="Sudeep Music API ⚡ Auto Fetch")
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client["MusicAPI_DB1"]
-collection = db["songs_cache"]
+collection = db["songs_cachee"]
 
 MEM_CACHE = {}
 

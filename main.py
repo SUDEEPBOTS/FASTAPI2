@@ -14,12 +14,25 @@ import yt_dlp
 # CONFIG
 # ─────────────────────────────
 MONGO_URL = os.getenv("MONGO_DB_URI")
+if not MONGO_URL:
+    print("⚠️ MONGO_DB_URI not found.")
+
 CATBOX_UPLOAD = "https://catbox.moe/user/api.php"
-COOKIES_PATH = "/app/cookies.txt" # Path check kar lena apna
+
+# COOKIES PATH CHECK
+COOKIES_PATHS = ["/app/cookies.txt", "./cookies.txt", "/etc/cookies.txt", "/tmp/cookies.txt"]
+COOKIES_PATH = None
+for path in COOKIES_PATHS:
+    if os.path.exists(path):
+        COOKIES_PATH = path
+        print(f"✅ Found cookies: {path}")
+        break
 
 app = FastAPI(title="⚡ Sudeep API (Search-First Mode)")
 
-# DB Setup
+# ─────────────────────────────
+# DATABASE
+# ─────────────────────────────
 mongo = AsyncIOMotorClient(MONGO_URL)
 db = mongo["MusicAPI_DB12"]
 videos_col = db["videos_cacht"]
@@ -43,21 +56,21 @@ def format_time(seconds):
     try: return f"{int(seconds)//60}:{int(seconds)%60:02d}"
     except: return "0:00"
 
-# 🔥 STEP 1: SIRF ID NIKALNE KE LIYE SEARCH (Fast)
+# 🔥 STEP 1: SEARCH ONLY (ID Nikaalne ke liye)
 def get_video_id_only(query: str):
-    # 'extract_flat' True rakha hai taaki video download na ho, bas ID mile
+    # 'extract_flat' True = No Download, Just Metadata
     ydl_opts = {'quiet': True, 'skip_download': True, 'extract_flat': True, 'noplaylist': True}
-    if os.path.exists(COOKIES_PATH): ydl_opts['cookiefile'] = COOKIES_PATH
+    if COOKIES_PATH: ydl_opts['cookiefile'] = COOKIES_PATH
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Agar direct URL/ID hai
-            if extract_video_id(query):
-                vid = extract_video_id(query)
-                info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
-                return vid, info.get('title'), format_time(info.get('duration'))
+            # Agar direct Video ID/URL hai
+            direct_id = extract_video_id(query)
+            if direct_id:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={direct_id}", download=False)
+                return direct_id, info.get('title'), format_time(info.get('duration'))
             
-            # Agar text query hai ("ishq")
+            # Agar Search Query hai
             else:
                 info = ydl.extract_info(f"ytsearch1:{query}", download=False)
                 if info and 'entries' in info and info['entries']:
@@ -74,7 +87,7 @@ def upload_catbox(path: str):
         return r.text.strip() if r.status_code == 200 and r.text.startswith("http") else None
     except: return None
 
-# 🔥 STEP 2: DOWNLOAD (Sirf tab jab DB mein na mile)
+# 🔥 STEP 2: DOWNLOAD (Sirf jab DB mein na ho)
 def auto_download_video(video_id: str):
     random_name = str(uuid.uuid4())
     out = f"/tmp/{random_name}.mp4"
@@ -87,7 +100,7 @@ def auto_download_video(video_id: str):
         "--postprocessor-args", "VideoConvertor:-c:v libx264 -c:a aac -movflags +faststart",
         "-o", out, f"https://www.youtube.com/watch?v={video_id}"
     ]
-    if os.path.exists(COOKIES_PATH): 
+    if COOKIES_PATH: 
         cmd.insert(3, "--cookies"); cmd.insert(4, COOKIES_PATH)
 
     try:
@@ -104,12 +117,20 @@ async def verify_key_fast(key: str):
     except: return False
 
 # ─────────────────────────────
-# MAIN ENDPOINT
+# 🔥 UPTIME ENDPOINT (24/7 Keep Alive)
+# ─────────────────────────────
+@app.get("/")
+def home():
+    return {"status": "Running", "mode": "Search-First"}
+
+# ─────────────────────────────
+# MAIN API
 # ─────────────────────────────
 @app.get("/getvideo")
 async def get_video(query: str, key: str):
     start_time = time.time()
     
+    # 1. Auth Check
     if not await verify_key_fast(key): return {"status": 403, "error": "Invalid Key"}
 
     clean_query = query.strip().lower()
@@ -124,7 +145,7 @@ async def get_video(query: str, key: str):
     
     if cached_q:
         video_id = cached_q["video_id"]
-        # DB se title/duration bhi utha lo agar hai
+        # DB se title/duration utha lo
         meta = await videos_col.find_one({"video_id": video_id})
         title = meta["title"] if meta else "Unknown"
         duration = meta["duration"] if meta else "0:00"
@@ -135,7 +156,7 @@ async def get_video(query: str, key: str):
         print(f"🔍 Searching YouTube for: {query}")
         video_id, title, duration = await asyncio.to_thread(get_video_id_only, query)
         
-        # Mapping Save kar lo future ke liye
+        # Mapping Save kar lo
         if video_id:
              await queries_col.update_one({"query": clean_query}, {"$set": {"video_id": video_id}}, upsert=True)
 
@@ -145,9 +166,10 @@ async def get_video(query: str, key: str):
     # PART B: CHECK DATABASE (The Magic Step) ✨
     # ──────────────────────────────────────────────────
     
-    # Ab hamare paas ID hai via Search. Check karo kya ye downloaded hai?
+    # ID mil gayi. Ab check karo kya ye Downloaded hai?
     cached = await videos_col.find_one({"video_id": video_id})
     
+    # Agar Link hai -> Instant Return (SKIP DOWNLOAD)
     if cached and cached.get("catbox_link"):
         print(f"✅ Found in DB: {title}")
         return {
@@ -165,7 +187,7 @@ async def get_video(query: str, key: str):
     
     print(f"⏳ Not in DB. Downloading: {title}")
     
-    # 1. Metadata save kar lo
+    # 1. Metadata save (Status: Processing)
     await videos_col.update_one(
         {"video_id": video_id}, 
         {"$set": {"video_id": video_id, "title": title, "duration": duration}}, 

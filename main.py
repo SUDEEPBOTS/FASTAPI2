@@ -1,68 +1,106 @@
 import os
 from fastapi import FastAPI, HTTPException
-from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
 from youtubesearchpython import VideosSearch
 
-app = FastAPI(title="Sudeep's Music API - Super Smart Mode")
+# ─────────────────────────────
+# APP SETUP
+# ─────────────────────────────
+app = FastAPI(title="Sudeep Music API ⚡ Ultra Fast")
 
 MONGO_URL = os.getenv("MONGO_DB_URI")
-client = MongoClient(MONGO_URL)
+client = AsyncIOMotorClient(MONGO_URL)
 db = client["MusicAPI_DB"]
 collection = db["songs_cache"]
 
-@app.get("/get")
-def get_music(query: str):
-    # 1. PEHLE DEKHO KYA QUERY KHUD EK VIDEO ID HAI?
-    video_id = None
+# 🔥 In-memory ultra fast cache
+MEM_CACHE = {}
+
+# ─────────────────────────────
+# HELPERS
+# ─────────────────────────────
+def extract_video_id(query: str):
+    query = query.strip()
+
     if len(query) == 11 and " " not in query:
-        video_id = query
-    elif "v=" in query:
-        video_id = query.split("v=")[1].split("&")[0]
-    elif "youtu.be/" in query:
-        video_id = query.split("youtu.be/")[1].split("?")[0]
+        return query
 
-    # 2. AGAR ID MIL GAYI TOH PEHLE DB MEIN DHOUNDO (No YouTube Search needed)
+    if "v=" in query:
+        return query.split("v=")[1].split("&")[0]
+
+    if "youtu.be/" in query:
+        return query.split("youtu.be/")[1].split("?")[0]
+
+    return None
+
+
+# ─────────────────────────────
+# MAIN API
+# ─────────────────────────────
+@app.get("/get")
+async def get_music(query: str):
+    video_id = extract_video_id(query)
+
+    # 1️⃣ RAM CACHE (FASTEST)
+    if video_id and video_id in MEM_CACHE:
+        return MEM_CACHE[video_id]
+
+    # 2️⃣ DATABASE CACHE
     if video_id:
-        cached_song = collection.find_one({"video_id": video_id})
-        if cached_song:
-            return {
-                "status": "success",
-                "found_in_db": True,
-                "title": cached_song.get("title"),
-                "download_link": cached_song["catbox_link"],
-                "source": "Direct Database Cache ⚡"
+        cached = await collection.find_one(
+            {"video_id": video_id},
+            {"_id": 0}
+        )
+        if cached:
+            response = {
+                "t": cached["title"],
+                "u": cached["catbox_link"]
             }
+            MEM_CACHE[video_id] = response
+            return response
 
-    # 3. AGAR ID NAHI THI YA DB MEIN NAHI MILA, TAB YOUTUBE SEARCH KARO
+    # 3️⃣ YOUTUBE SEARCH (LAST OPTION)
     try:
-        search = VideosSearch(query, limit=1)
-        res = search.result()['result']
-        if not res:
-            raise Exception("No search results")
-        
-        yt_id = res[0]['id']
-        yt_title = res[0]['title']
+        search = VideosSearch(query, limit=1, timeout=3)
+        res = search.result().get("result")
 
-        # Phir se check karo ki kya ye search wala ID DB mein hai?
-        cached_song = collection.find_one({"video_id": yt_id})
-        if cached_song:
-            return {
-                "status": "success",
-                "found_in_db": True,
-                "title": cached_song.get("title", yt_title),
-                "download_link": cached_song["catbox_link"],
-                "source": "Search Result Cache ⚡"
+        if not res:
+            raise Exception("No results")
+
+        yt_id = res[0]["id"]
+        yt_title = res[0]["title"]
+
+        # Search result DB cache
+        cached = await collection.find_one(
+            {"video_id": yt_id},
+            {"_id": 0}
+        )
+        if cached:
+            response = {
+                "t": cached.get("title", yt_title),
+                "u": cached["catbox_link"]
             }
-        else:
-            return {
-                "status": "failed",
-                "found_in_db": False,
-                "message": "Gaana YT par mila par DB mein nahi hai. Pehle bot pe bajao.",
-                "video_id": yt_id,
-                "title": yt_title
-            }
-    except Exception as e:
-        # Agar YouTube block hai par humare paas ID thi, toh upar hi return ho gaya hota
-        # Agar yahan pahuncha hai toh search bhi fail aur ID bhi nahi thi
-        raise HTTPException(status_code=404, detail="Youtube search blocked or not found.")
-        
+            MEM_CACHE[yt_id] = response
+            return response
+
+        # ❌ Not cached yet
+        return {
+            "error": "NOT_CACHED",
+            "video_id": yt_id,
+            "title": yt_title,
+            "message": "Song mila par DB me nahi hai. Pehle bot se download karao."
+        }
+
+    except Exception:
+        raise HTTPException(
+            status_code=404,
+            detail="YouTube search failed or blocked"
+        )
+
+
+# ─────────────────────────────
+# OPTIONAL: HEALTH CHECK
+# ─────────────────────────────
+@app.get("/")
+async def home():
+    return {"status": "ok", "cache_items": len(MEM_CACHE)}

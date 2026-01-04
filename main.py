@@ -215,6 +215,7 @@ async def get_video(query: str, key: str):
         "title": title,
         "duration": duration,
         "link": link,
+        "id": video_id,  #
         "cached": False,
         "response_time": f"{time.time()-start_time:.2f}s"
     }

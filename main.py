@@ -91,16 +91,18 @@ def auto_download(video_id: str) -> str:
 
     out = f"/tmp/{video_id}.mp3"
     cmd = [
-        "python", "-m", "yt_dlp",
-        "--cookies", COOKIES_PATH,
-        "--no-playlist",
-        "--geo-bypass",
-        "-f", "bestaudio",
-        "--extract-audio",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",
-        yt_url(video_id),
-        "-o", out
+    "python", "-m", "yt_dlp",
+    "--cookies", COOKIES_PATH,
+    "--js-runtimes", "node",
+    "--no-playlist",
+    "--geo-bypass",
+    "--force-ipv4",
+    "-f", "bestaudio",
+    "--extract-audio",
+    "--audio-format", "mp3",
+    "--audio-quality", "0",
+    yt_url(video_id),
+    "-o", out
     ]
 
     subprocess.run(cmd, check=True, timeout=300)

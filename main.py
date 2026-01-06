@@ -14,6 +14,9 @@ import yt_dlp
 # CONFIG
 # ─────────────────────────────
 MONGO_URL = os.getenv("MONGO_DB_URI")
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # ⚠️ Ye Zaroor Daalna Env Vars mein
+LOGGER_ID = -1003639584506          # ✅ Tera Logger Group ID
+
 if not MONGO_URL:
     print("⚠️ MONGO_DB_URI not found.")
 
@@ -28,7 +31,7 @@ for path in COOKIES_PATHS:
         print(f"✅ Found cookies: {path}")
         break
 
-app = FastAPI(title="⚡ Sudeep API (Ultimate Version)")
+app = FastAPI(title="⚡ Sudeep API (Logger + Thumb Fix)")
 
 # ─────────────────────────────
 # DATABASE
@@ -40,7 +43,7 @@ keys_col = db["api_users"]
 queries_col = db["query_mapping"]
 
 # ─────────────────────────────
-# FUNCTIONS
+# HELPER FUNCTIONS
 # ─────────────────────────────
 def extract_video_id(q: str):
     if not q: return None
@@ -56,6 +59,29 @@ def format_time(seconds):
     try: return f"{int(seconds)//60}:{int(seconds)%60:02d}"
     except: return "0:00"
 
+# 📸 FORCE THUMBNAIL (Jugaad Function)
+def get_fallback_thumb(vid_id):
+    return f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
+
+# 📢 SEND LOG TO TELEGRAM
+def send_telegram_log(title, duration, link, vid_id):
+    if not BOT_TOKEN: return
+    try:
+        msg = (
+            f"🆕 **New Song Hijacked!**\n\n"
+            f"🎸 **Title:** {title}\n"
+            f"⏱ **Duration:** {duration}\n"
+            f"🆔 **ID:** `{vid_id}`\n"
+            f"🔗 **Link:** {link}\n\n"
+            f"🤖 #SudeepAPI"
+        )
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data={"chat_id": LOGGER_ID, "text": msg, "parse_mode": "Markdown"}
+        )
+    except Exception as e:
+        print(f"❌ Logger Error: {e}")
+
 # 🔥 STEP 1: SEARCH ONLY (Metadata + Thumbnail)
 def get_video_id_only(query: str):
     ydl_opts = {'quiet': True, 'skip_download': True, 'extract_flat': True, 'noplaylist': True}
@@ -67,14 +93,19 @@ def get_video_id_only(query: str):
             direct_id = extract_video_id(query)
             if direct_id:
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={direct_id}", download=False)
-                return direct_id, info.get('title'), format_time(info.get('duration')), info.get('thumbnail')
+                # 👇 Thumbnail Check
+                thumb = info.get('thumbnail') or get_fallback_thumb(direct_id)
+                return direct_id, info.get('title'), format_time(info.get('duration')), thumb
 
             # Case B: Search Query
             else:
                 info = ydl.extract_info(f"ytsearch1:{query}", download=False)
                 if info and 'entries' in info and info['entries']:
                     v = info['entries'][0]
-                    return v['id'], v['title'], format_time(v.get('duration')), v.get('thumbnail')
+                    vid_id = v['id']
+                    # 👇 Thumbnail Check
+                    thumb = v.get('thumbnail') or get_fallback_thumb(vid_id)
+                    return vid_id, v['title'], format_time(v.get('duration')), thumb
     except Exception as e:
         print(f"Search Error: {e}")
     return None, None, None, None
@@ -108,7 +139,7 @@ def auto_download_video(video_id: str):
     except: return None
 
 # ─────────────────────────────
-# 🔥 AUTH CHECK + USAGE INCREMENT (BUG FIXED)
+# 🔥 AUTH CHECK + USAGE INCREMENT
 # ─────────────────────────────
 async def verify_and_count(key: str):
     doc = await keys_col.find_one({"api_key": key})
@@ -116,20 +147,17 @@ async def verify_and_count(key: str):
     if not doc or not doc.get("active", True):
         return False, "Invalid/Inactive Key"
 
-    # Daily Reset Check
     today = str(datetime.date.today())
     if doc.get("last_reset") != today:
         await keys_col.update_one(
             {"api_key": key},
             {"$set": {"used_today": 0, "last_reset": today}}
         )
-        doc["used_today"] = 0 # Update local var
+        doc["used_today"] = 0 
 
-    # Limit Check
     if doc.get("used_today", 0) >= doc.get("daily_limit", 100):
         return False, "Daily Limit Exceeded"
 
-    # ✅ INCREMENT USAGE
     await keys_col.update_one(
         {"api_key": key},
         {
@@ -140,38 +168,28 @@ async def verify_and_count(key: str):
     return True, None
 
 # ─────────────────────────────
-# 🔥 NEW ENDPOINTS (STATS)
+# 🔥 STATS & HOME
 # ─────────────────────────────
 @app.get("/stats")
 async def get_stats():
     total_songs = await videos_col.count_documents({})
     total_users = await keys_col.count_documents({})
-    return {
-        "status": 200,
-        "total_songs_hijacked": total_songs,
-        "total_api_keys": total_users,
-        "message": "System Mast Chal Raha Hai! 🚀"
-    }
+    return {"status": 200, "total_songs": total_songs, "total_users": total_users}
 
 @app.get("/user_stats")
 async def user_stats(target_key: str):
     doc = await keys_col.find_one({"api_key": target_key})
     if not doc: return {"status": 404, "error": "Key Not Found"}
     return {
-        "status": 200,
         "user_id": doc.get("user_id"),
         "used_today": doc.get("used_today", 0),
         "total_usage": doc.get("total_usage", 0),
-        "daily_limit": doc.get("daily_limit", 100),
-        "last_active": doc.get("last_reset")
+        "daily_limit": doc.get("daily_limit", 100)
     }
 
-# ─────────────────────────────
-# 🔥 UPTIME ENDPOINT (FIXED: Supports HEAD & GET)
-# ─────────────────────────────
 @app.api_route("/", methods=["GET", "HEAD"])
 async def home():
-    return {"status": "Running", "mode": "Ultimate Version"}
+    return {"status": "Running", "version": "Logger + Thumb Fix"}
 
 # ─────────────────────────────
 # MAIN API LOGIC
@@ -196,23 +214,25 @@ async def get_video(query: str, key: str):
 
     if cached_q:
         video_id = cached_q["video_id"]
-        # Fetch Metadata from DB
         meta = await videos_col.find_one({"video_id": video_id})
         if meta:
             title = meta.get("title", "Unknown")
             duration = meta.get("duration", "0:00")
-            thumbnail = meta.get("thumbnail") # Fetch Thumbnail
-        print(f"🧠 Memory Match: {clean_query} -> {video_id}")
+            thumbnail = meta.get("thumbnail")
 
     # Search if not in memory
     if not video_id:
-        print(f"🔍 Searching YouTube for: {query}")
+        print(f"🔍 Searching: {query}")
         video_id, title, duration, thumbnail = await asyncio.to_thread(get_video_id_only, query)
 
         if video_id:
              await queries_col.update_one({"query": clean_query}, {"$set": {"video_id": video_id}}, upsert=True)
 
     if not video_id: return {"status": 404, "error": "Not Found"}
+
+    # 🔥 FINAL THUMBNAIL CHECK (Agar search se nahi mila toh manually banao)
+    if not thumbnail:
+        thumbnail = get_fallback_thumb(video_id)
 
     # PART B: CHECK DATABASE
     cached = await videos_col.find_one({"video_id": video_id})
@@ -225,12 +245,12 @@ async def get_video(query: str, key: str):
             "duration": cached.get("duration", duration),
             "link": cached["catbox_link"],
             "id": video_id,
-            "thumbnail": cached.get("thumbnail", thumbnail), # Return Thumbnail
+            "thumbnail": cached.get("thumbnail", thumbnail), # ✅ Fixed
             "cached": True,
             "response_time": f"{time.time()-start_time:.2f}s"
         }
 
-    # PART C: DOWNLOAD & SAVE
+    # PART C: DOWNLOAD & SAVE (NEW SONG)
     print(f"⏳ Downloading: {title}")
 
     # Save Metadata + Thumbnail immediately
@@ -240,7 +260,7 @@ async def get_video(query: str, key: str):
             "video_id": video_id, 
             "title": title, 
             "duration": duration,
-            "thumbnail": thumbnail # ✅ Saving Thumbnail to DB
+            "thumbnail": thumbnail # ✅ Saving to DB
         }}, 
         upsert=True
     )
@@ -253,10 +273,14 @@ async def get_video(query: str, key: str):
 
     if not link: return {"status": 500, "error": "Upload Failed"}
 
+    # Update DB
     await videos_col.update_one(
         {"video_id": video_id},
         {"$set": {"catbox_link": link, "cached_at": datetime.datetime.now()}}
     )
+
+    # 📢 SEND TELEGRAM LOG (Background Task)
+    asyncio.create_task(asyncio.to_thread(send_telegram_log, title, duration, link, video_id))
 
     return {
         "status": 200,
@@ -264,7 +288,7 @@ async def get_video(query: str, key: str):
         "duration": duration,
         "link": link,
         "id": video_id,
-        "thumbnail": thumbnail, # Return Thumbnail
+        "thumbnail": thumbnail, # ✅ Returned
         "cached": False,
         "response_time": f"{time.time()-start_time:.2f}s"
     }

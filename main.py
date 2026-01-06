@@ -68,12 +68,12 @@ def send_telegram_log(title, duration, link, vid_id):
     if not BOT_TOKEN: return
     try:
         msg = (
-            f"🆕 **New Song Hijacked!**\n\n"
-            f"🎸 **Title:** {title}\n"
-            f"⏱ **Duration:** {duration}\n"
-            f"🆔 **ID:** `{vid_id}`\n"
-            f"🔗 **Link:** {link}\n\n"
-            f"🤖 #SudeepAPI"
+            f"🍫 **ɴᴇᴡ sᴏɴɢ**\n\n"
+            f"🫶 **ᴛɪᴛʟᴇ:** {title}\n\n"
+            f"⏱ **ᴅᴜʀᴀᴛɪᴏɴ:** {duration}\n"
+            f"🛡️ **ɪᴅ:** `{vid_id}`\n"
+            f"👀 [ʟɪɴᴋ]({link})\n\n"
+            f"🍭 @Kaito_3_2"
         )
         requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",

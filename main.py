@@ -1,30 +1,27 @@
 import os
 import time
 import datetime
-import subprocess
 import requests
 import re
 import asyncio
 import uuid
-import sys  # <--- Ye zaruri hai update ke liye
+import sys
+import subprocess
 
 # ─────────────────────────────
-# 🔥 AUTO-UPDATE FIX (Ye line sabse important hai)
+# 🔥 AUTO-UPDATE (Keep this!)
 # ─────────────────────────────
-# Ye code start hote hi check karega aur yt-dlp ko update kar dega
 try:
-    print("🔄 Force Updating yt-dlp to fix 403/Options error...")
+    print("🔄 Force Updating yt-dlp...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"])
-    print("✅ yt-dlp Updated Successfully! Now starting app...")
+    print("✅ yt-dlp Updated Successfully!")
 except Exception as e:
-    print(f"⚠️ Warning: Auto-update failed: {e}")
+    print(f"⚠️ Auto-update failed: {e}")
 
-# ─────────────────────────────
-# IMPORTS CONTINUED
-# ─────────────────────────────
-from fastapi import FastAPI, HTTPException
-from motor.motor_asyncio import AsyncIOMotorClient
+# Update ke baad hi import karo taaki naya version load ho
 import yt_dlp
+from fastapi import FastAPI
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # ─────────────────────────────
 # CONFIG
@@ -47,7 +44,7 @@ for path in COOKIES_PATHS:
         print(f"✅ Found cookies: {path}")
         break
 
-app = FastAPI(title="⚡ Sudeep API (Logger + Thumb Fix)")
+app = FastAPI(title="⚡ Sudeep API (Python Native Fix)")
 
 # ─────────────────────────────
 # DATABASE
@@ -104,7 +101,7 @@ def upload_catbox(path: str):
     except: return None
 
 # ─────────────────────────────
-# 🔥 STEP 1: SEARCH ONLY (UPDATED)
+# 🔥 STEP 1: SEARCH ONLY
 # ─────────────────────────────
 def get_video_id_only(query: str):
     ydl_opts = {
@@ -112,12 +109,9 @@ def get_video_id_only(query: str):
         'skip_download': True, 
         'extract_flat': True, 
         'noplaylist': True,
-        # ✅ Fixes for 403 Forbidden
         'compat_opts': {'remote-components': 'ejs:github'},
         'extractor_args': {'youtube': {'player_client': ['web_embedded', 'web']}},
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        }
+        'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     }
     if COOKIES_PATH: ydl_opts['cookiefile'] = COOKIES_PATH
 
@@ -140,36 +134,51 @@ def get_video_id_only(query: str):
     return None, None, None, None
 
 # ─────────────────────────────
-# 🔥 STEP 2: DOWNLOAD (UPDATED)
+# 🔥 STEP 2: DOWNLOAD (PYTHON NATIVE REPLACEMENT)
 # ─────────────────────────────
 def auto_download_video(video_id: str):
     random_name = str(uuid.uuid4())
     out = f"/tmp/{random_name}.mp4"
     if os.path.exists(out): os.remove(out)
 
-    # ✅ Fixes for 403 Forbidden
-    cmd = [
-        "python", "-m", "yt_dlp", 
-        "--js-runtimes", "node", 
-        "--no-playlist", 
-        "--geo-bypass",
-        "--compat-opts", "remote-components=ejs:github",
-        "--extractor-args", "youtube:player-client=web_embedded,web",
-        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--postprocessor-args", "VideoConvertor:-c:v libx264 -c:a aac -movflags +faststart",
-        "-o", out, f"https://www.youtube.com/watch?v={video_id}"
-    ]
+    # ✅ AB HUM SUBPROCESS USE NAHI KARENGE
+    # ✅ DIRECT PYTHON LIBRARY USE KARENGE (Jo Updated Hai)
     
-    if COOKIES_PATH: 
-        cmd.insert(3, "--cookies"); cmd.insert(4, COOKIES_PATH)
+    ydl_opts = {
+        'format': 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best',
+        'outtmpl': out,
+        'merge_output_format': 'mp4',
+        'noplaylist': True,
+        'geo_bypass': True,
+        
+        # 🛡️ THE FIXES (Python Dictionary Format)
+        'compat_opts': {'remote-components': 'ejs:github'},
+        'extractor_args': {'youtube': {'player_client': ['web_embedded', 'web']}},
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        },
+        
+        # ⚙️ Post Processor (FFmpeg)
+        'postprocessor_args': {
+            'ffmpeg': ['-c:v', 'libx264', '-c:a', 'aac', '-movflags', '+faststart']
+        }
+    }
+
+    if COOKIES_PATH:
+        ydl_opts['cookiefile'] = COOKIES_PATH
 
     try:
-        subprocess.run(cmd, check=True, timeout=900)
-        return out if os.path.exists(out) and os.path.getsize(out) > 1024 else None
+        # 🔥 Actual Download via Python
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+            
+        # Check if file exists
+        if os.path.exists(out) and os.path.getsize(out) > 1024:
+            return out
+        else:
+            return None
     except Exception as e:
-        print(f"Download Error: {e}")
+        print(f"Download Error (Python Native): {e}")
         return None
 
 # ─────────────────────────────
@@ -200,7 +209,7 @@ async def user_stats(target_key: str):
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def home():
-    return {"status": "Running", "version": "Logger + Thumb Fix"}
+    return {"status": "Running", "version": "Python Native Fix"}
 
 @app.get("/getvideo")
 async def get_video(query: str, key: str):

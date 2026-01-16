@@ -6,6 +6,22 @@ import requests
 import re
 import asyncio
 import uuid
+import sys  # <--- Ye zaruri hai update ke liye
+
+# ─────────────────────────────
+# 🔥 AUTO-UPDATE FIX (Ye line sabse important hai)
+# ─────────────────────────────
+# Ye code start hote hi check karega aur yt-dlp ko update kar dega
+try:
+    print("🔄 Force Updating yt-dlp to fix 403/Options error...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"])
+    print("✅ yt-dlp Updated Successfully! Now starting app...")
+except Exception as e:
+    print(f"⚠️ Warning: Auto-update failed: {e}")
+
+# ─────────────────────────────
+# IMPORTS CONTINUED
+# ─────────────────────────────
 from fastapi import FastAPI, HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
 import yt_dlp
@@ -88,15 +104,15 @@ def upload_catbox(path: str):
     except: return None
 
 # ─────────────────────────────
-# 🔥 STEP 1: SEARCH ONLY (UPDATED FIX)
+# 🔥 STEP 1: SEARCH ONLY (UPDATED)
 # ─────────────────────────────
 def get_video_id_only(query: str):
-    # ✅ FIX ADDED HERE: Player Client & Remote Components
     ydl_opts = {
         'quiet': True, 
         'skip_download': True, 
         'extract_flat': True, 
         'noplaylist': True,
+        # ✅ Fixes for 403 Forbidden
         'compat_opts': {'remote-components': 'ejs:github'},
         'extractor_args': {'youtube': {'player_client': ['web_embedded', 'web']}},
         'http_headers': {
@@ -124,14 +140,14 @@ def get_video_id_only(query: str):
     return None, None, None, None
 
 # ─────────────────────────────
-# 🔥 STEP 2: DOWNLOAD (UPDATED FIX)
+# 🔥 STEP 2: DOWNLOAD (UPDATED)
 # ─────────────────────────────
 def auto_download_video(video_id: str):
     random_name = str(uuid.uuid4())
     out = f"/tmp/{random_name}.mp4"
     if os.path.exists(out): os.remove(out)
 
-    # ✅ FIX ADDED HERE: Added flags for n-challenge & client
+    # ✅ Fixes for 403 Forbidden
     cmd = [
         "python", "-m", "yt_dlp", 
         "--js-runtimes", "node", 
@@ -157,7 +173,7 @@ def auto_download_video(video_id: str):
         return None
 
 # ─────────────────────────────
-# 🔥 AUTH CHECK & ROUTES (No Changes Needed Here)
+# 🔥 AUTH CHECK & ROUTES
 # ─────────────────────────────
 async def verify_and_count(key: str):
     doc = await keys_col.find_one({"api_key": key})

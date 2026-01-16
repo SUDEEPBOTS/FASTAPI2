@@ -33,16 +33,16 @@ if not MONGO_URL:
 
 CATBOX_UPLOAD = "https://catbox.moe/user/api.php"
 
-# ⚠️ COOKIES DISABLED FOR ANDROID CLIENT COMPATIBILITY
-# Android client cookies support nahi karta, par wo bina cookies ke fast chalta hai.
-COOKIES_PATH = None 
-# for path in ["/app/cookies.txt", "./cookies.txt"]:
-#     if os.path.exists(path):
-#         COOKIES_PATH = path
-#         print(f"✅ Found cookies: {path}")
-#         break
+# ✅ COOKIES ENABLED (iOS Client ke liye zaroori hai)
+COOKIES_PATHS = ["/app/cookies.txt", "./cookies.txt", "/etc/cookies.txt", "/tmp/cookies.txt"]
+COOKIES_PATH = None
+for path in COOKIES_PATHS:
+    if os.path.exists(path):
+        COOKIES_PATH = path
+        print(f"✅ Found cookies: {path}")
+        break
 
-app = FastAPI(title="⚡ Sudeep API (Logger + Thumb Fix + Proxy + Android Bypass)")
+app = FastAPI(title="⚡ Sudeep API (Logger + Thumb Fix + Proxy + iOS Bypass)")
 
 # ─────────────────────────────
 # DATABASE
@@ -132,7 +132,7 @@ def get_random_proxy():
     return None
 
 # ─────────────────────────────
-# 🔥 STEP 1: SEARCH ONLY (Android Mode - No Cookies)
+# 🔥 STEP 1: SEARCH ONLY (iOS Mode + Cookies)
 # ─────────────────────────────
 def get_video_id_only(query: str):
     max_retries = 3
@@ -146,13 +146,12 @@ def get_video_id_only(query: str):
             'noplaylist': True,
             'remote_components': 'ejs:github', 
             'js_runtimes': ['node'],
-            # ✅ Android Client Enabled
-            'extractor_args': {'youtube': {'player_client': ['android']}}
+            # ✅ iOS Client (Supports Cookies + Bypasses Bot Check)
+            'extractor_args': {'youtube': {'player_client': ['ios']}}
         }
         
-        # ❌ Cookies Removed to prevent "Skipping android client" error
-        # if COOKIES_PATH: ydl_opts['cookiefile'] = COOKIES_PATH
-        
+        # ✅ Cookies Enabled
+        if COOKIES_PATH: ydl_opts['cookiefile'] = COOKIES_PATH
         if current_proxy: ydl_opts['proxy'] = current_proxy
 
         try:
@@ -187,7 +186,7 @@ def upload_catbox(path: str):
     except: return None
 
 # ─────────────────────────────
-# 🔥 STEP 2: DOWNLOAD (Android Mode - No Cookies)
+# 🔥 STEP 2: DOWNLOAD (iOS Mode + Cookies)
 # ─────────────────────────────
 def auto_download_video(video_id: str):
     random_name = str(uuid.uuid4())
@@ -203,16 +202,16 @@ def auto_download_video(video_id: str):
             "--js-runtimes", "node", 
             "--no-playlist", "--geo-bypass",
             "--remote-components", "ejs:github",
-            # ✅ Android Client (Crucial)
-            "--extractor-args", "youtube:player_client=android",
+            # ✅ iOS Client (Auth + Speed)
+            "--extractor-args", "youtube:player_client=ios",
             "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
             "--merge-output-format", "mp4",
             "--postprocessor-args", "VideoConvertor:-c:v libx264 -c:a aac -movflags +faststart",
             "-o", out
         ]
         
-        # ❌ Cookies Removed
-        # if COOKIES_PATH: cmd += ["--cookies", COOKIES_PATH]
+        # ✅ Cookies Back in Command
+        if COOKIES_PATH: cmd += ["--cookies", COOKIES_PATH]
         
         if current_proxy:
             cmd += ["--proxy", current_proxy]
@@ -271,7 +270,7 @@ async def user_stats(target_key: str):
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def home():
-    return {"status": "Running", "version": "Android Client + No Cookies"}
+    return {"status": "Running", "version": "iOS Client + Proxy + Cookies"}
 
 @app.get("/getvideo")
 async def get_video(query: str, key: str):

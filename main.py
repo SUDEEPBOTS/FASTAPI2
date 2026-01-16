@@ -6,6 +6,7 @@ import requests
 import re
 import asyncio
 import uuid
+import random
 from fastapi import FastAPI, HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
 import yt_dlp
@@ -14,8 +15,21 @@ import yt_dlp
 # CONFIG
 # ─────────────────────────────
 MONGO_URL = os.getenv("MONGO_DB_URI")
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # ⚠️ Ye Zaroor Daalna Env Vars mein
-LOGGER_ID = -1003639584506          # ✅ Tera Logger Group ID
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+LOGGER_ID = -1003639584506
+
+# 🔥 PROXY CONFIGURATION (Automatic from Render Env)
+# Render ke "Environment" tab mein 'PROXY_API_URL' naam se key daalna
+PROXY_API_URL = os.getenv("PROXY_API_URL") 
+
+# Agar URL mila to True, nahi mila to False
+USE_PROXY = bool(PROXY_API_URL) 
+PROXIES_CACHE = [] 
+
+if USE_PROXY:
+    print("✅ Proxy System ENABLED. Fetching from Webshare...")
+else:
+    print("⚠️ Proxy System DISABLED. (PROXY_API_URL not found in Env)")
 
 if not MONGO_URL:
     print("⚠️ MONGO_DB_URI not found.")
@@ -31,7 +45,7 @@ for path in COOKIES_PATHS:
         print(f"✅ Found cookies: {path}")
         break
 
-app = FastAPI(title="⚡ Sudeep API (Logger + Thumb Fix)")
+app = FastAPI(title="⚡ Sudeep API (Logger + Thumb Fix + Proxy)")
 
 # ─────────────────────────────
 # DATABASE
@@ -59,11 +73,9 @@ def format_time(seconds):
     try: return f"{int(seconds)//60}:{int(seconds)%60:02d}"
     except: return "0:00"
 
-# 📸 FORCE THUMBNAIL (Jugaad Function)
 def get_fallback_thumb(vid_id):
     return f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
 
-# 📢 SEND LOG TO TELEGRAM
 def send_telegram_log(title, duration, link, vid_id):
     if not BOT_TOKEN: return
     try:
@@ -82,32 +94,112 @@ def send_telegram_log(title, duration, link, vid_id):
     except Exception as e:
         print(f"❌ Logger Error: {e}")
 
-# 🔥 STEP 1: SEARCH ONLY (Metadata + Thumbnail)
-def get_video_id_only(query: str):
-    ydl_opts = {'quiet': True, 'skip_download': True, 'extract_flat': True, 'noplaylist': True}
-    if COOKIES_PATH: ydl_opts['cookiefile'] = COOKIES_PATH
-
+# ─────────────────────────────
+# 🔥 PROXY MANAGER (Webshare Optimized)
+# ─────────────────────────────
+def fetch_proxies():
+    """Webshare API se proxies layega aur format karega"""
+    global PROXIES_CACHE
+    if not USE_PROXY or not PROXY_API_URL: return
+    
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Case A: Direct ID/URL
-            direct_id = extract_video_id(query)
-            if direct_id:
-                info = ydl.extract_info(f"https://www.youtube.com/watch?v={direct_id}", download=False)
-                # 👇 Thumbnail Check
-                thumb = info.get('thumbnail') or get_fallback_thumb(direct_id)
-                return direct_id, info.get('title'), format_time(info.get('duration')), thumb
+        print("🔄 Fetching new proxies from Webshare...")
+        resp = requests.get(PROXY_API_URL, timeout=15)
+        
+        if resp.status_code == 200:
+            lines = resp.text.strip().split('\n')
+            new_proxies = []
+            
+            for line in lines:
+                clean_line = line.strip()
+                if not clean_line: continue
+                
+                # Webshare Download List Format often is: IP:PORT:USERNAME:PASSWORD
+                parts = clean_line.split(':')
+                
+                if len(parts) == 4:
+                    # Format: http://user:pass@ip:port
+                    formatted = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+                    new_proxies.append(formatted)
+                elif len(parts) == 2:
+                    # Just IP:PORT (No Auth)
+                    new_proxies.append(f"http://{clean_line}")
+                else:
+                    # Fallback assuming it's already a valid URL or different format
+                    new_proxies.append(f"http://{clean_line}")
 
-            # Case B: Search Query
+            if new_proxies:
+                PROXIES_CACHE = new_proxies
+                print(f"✅ Loaded {len(PROXIES_CACHE)} proxies from Webshare.")
             else:
-                info = ydl.extract_info(f"ytsearch1:{query}", download=False)
-                if info and 'entries' in info and info['entries']:
-                    v = info['entries'][0]
-                    vid_id = v['id']
-                    # 👇 Thumbnail Check
-                    thumb = v.get('thumbnail') or get_fallback_thumb(vid_id)
-                    return vid_id, v['title'], format_time(v.get('duration')), thumb
+                print("⚠️ API returned empty list.")
+        else:
+            print(f"⚠️ Proxy API Error: {resp.status_code}")
+            
     except Exception as e:
-        print(f"Search Error: {e}")
+        print(f"❌ Proxy Fetch Error: {e}")
+
+def get_random_proxy():
+    """Ek random proxy return karega"""
+    if not USE_PROXY: return None
+    
+    # Agar cache khali hai to fetch karo
+    if not PROXIES_CACHE:
+        fetch_proxies()
+    
+    if PROXIES_CACHE:
+        return random.choice(PROXIES_CACHE)
+    return None
+
+# ─────────────────────────────
+# 🔥 STEP 1: SEARCH ONLY (Metadata + Thumbnail)
+# ─────────────────────────────
+def get_video_id_only(query: str):
+    max_retries = 3
+    for attempt in range(max_retries):
+        current_proxy = get_random_proxy()
+        
+        # ✅ Updated ydl_opts as per your request
+        ydl_opts = {
+            'quiet': True, 
+            'skip_download': True, 
+            'extract_flat': True, 
+            'noplaylist': True,
+            # ✅ New Correct Syntax
+            'remote_components': 'ejs:github', 
+            'js_runtimes': ['node']
+        }
+        
+        if COOKIES_PATH: ydl_opts['cookiefile'] = COOKIES_PATH
+        if current_proxy: 
+            ydl_opts['proxy'] = current_proxy
+            # print(f"🔍 Search Proxy: {current_proxy.split('@')[-1]}") # Debug Log
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                direct_id = extract_video_id(query)
+                if direct_id:
+                    info = ydl.extract_info(f"https://www.youtube.com/watch?v={direct_id}", download=False)
+                    thumb = info.get('thumbnail') or get_fallback_thumb(direct_id)
+                    return direct_id, info.get('title'), format_time(info.get('duration')), thumb
+
+                else:
+                    info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+                    if info and 'entries' in info and info['entries']:
+                        v = info['entries'][0]
+                        vid_id = v['id']
+                        thumb = v.get('thumbnail') or get_fallback_thumb(vid_id)
+                        return vid_id, v['title'], format_time(v.get('duration')), thumb
+            
+            break # Success
+            
+        except Exception as e:
+            print(f"⚠️ Search Error (Attempt {attempt+1}): {e}")
+            PROXIES_CACHE.clear() # Clear cache if issues persist to force refetch
+            if attempt == max_retries - 1:
+                return None, None, None, None
+            time.sleep(1)
+
     return None, None, None, None
 
 def upload_catbox(path: str):
@@ -117,26 +209,49 @@ def upload_catbox(path: str):
         return r.text.strip() if r.status_code == 200 and r.text.startswith("http") else None
     except: return None
 
-# 🔥 STEP 2: DOWNLOAD
+# ─────────────────────────────
+# 🔥 STEP 2: DOWNLOAD - WITH PROXY
+# ─────────────────────────────
 def auto_download_video(video_id: str):
     random_name = str(uuid.uuid4())
     out = f"/tmp/{random_name}.mp4"
     if os.path.exists(out): os.remove(out)
 
-    cmd = [
-        "python", "-m", "yt_dlp", "--js-runtimes", "node", "--no-playlist", "--geo-bypass",
-        "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--postprocessor-args", "VideoConvertor:-c:v libx264 -c:a aac -movflags +faststart",
-        "-o", out, f"https://www.youtube.com/watch?v={video_id}"
-    ]
-    if COOKIES_PATH: 
-        cmd.insert(3, "--cookies"); cmd.insert(4, COOKIES_PATH)
+    max_retries = 3
+    for attempt in range(max_retries):
+        current_proxy = get_random_proxy()
+        
+        cmd = [
+            "python", "-m", "yt_dlp", 
+            "--js-runtimes", "node", 
+            "--no-playlist", "--geo-bypass",
+            "--remote-components", "ejs:github", # ✅ CLI flag syntax (Correct for subprocess)
+            "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
+            "--merge-output-format", "mp4",
+            "--postprocessor-args", "VideoConvertor:-c:v libx264 -c:a aac -movflags +faststart",
+            "-o", out, f"https://www.youtube.com/watch?v={video_id}"
+        ]
+        
+        if COOKIES_PATH: 
+            cmd.insert(3, "--cookies"); cmd.insert(4, COOKIES_PATH)
+        
+        if current_proxy:
+            cmd.insert(3, "--proxy"); cmd.insert(4, current_proxy)
+            print(f"⬇️ Using Proxy for Download (Attempt {attempt+1})")
 
-    try:
-        subprocess.run(cmd, check=True, timeout=900)
-        return out if os.path.exists(out) and os.path.getsize(out) > 1024 else None
-    except: return None
+        try:
+            subprocess.run(cmd, check=True, timeout=900)
+            if os.path.exists(out) and os.path.getsize(out) > 1024:
+                return out # Success
+        except Exception as e:
+            print(f"⚠️ Download Fail (Attempt {attempt+1}): {e}")
+            if os.path.exists(out): os.remove(out)
+            
+            if attempt == max_retries - 1:
+                return None
+            time.sleep(2)
+
+    return None
 
 # ─────────────────────────────
 # 🔥 AUTH CHECK + USAGE INCREMENT
@@ -168,7 +283,7 @@ async def verify_and_count(key: str):
     return True, None
 
 # ─────────────────────────────
-# 🔥 STATS & HOME
+# 🔥 ROUTES
 # ─────────────────────────────
 @app.get("/stats")
 async def get_stats():
@@ -189,22 +304,16 @@ async def user_stats(target_key: str):
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def home():
-    return {"status": "Running", "version": "Logger + Thumb Fix"}
+    return {"status": "Running", "version": "Logger + Thumb Fix + Webshare Proxy"}
 
-# ─────────────────────────────
-# MAIN API LOGIC
-# ─────────────────────────────
 @app.get("/getvideo")
 async def get_video(query: str, key: str):
     start_time = time.time()
 
-    # 1. Auth Check
     is_valid, err = await verify_and_count(key)
     if not is_valid: return {"status": 403, "error": err}
 
     clean_query = query.strip().lower()
-
-    # PART A: IDENTIFY VIDEO
     video_id = None
     cached_q = await queries_col.find_one({"query": clean_query})
 
@@ -220,23 +329,18 @@ async def get_video(query: str, key: str):
             duration = meta.get("duration", "0:00")
             thumbnail = meta.get("thumbnail")
 
-    # Search if not in memory
     if not video_id:
         print(f"🔍 Searching: {query}")
         video_id, title, duration, thumbnail = await asyncio.to_thread(get_video_id_only, query)
-
         if video_id:
              await queries_col.update_one({"query": clean_query}, {"$set": {"video_id": video_id}}, upsert=True)
 
-    if not video_id: return {"status": 404, "error": "Not Found"}
+    if not video_id: return {"status": 404, "error": "Not Found / Proxy Error"}
 
-    # 🔥 FINAL THUMBNAIL CHECK (Agar search se nahi mila toh manually banao)
     if not thumbnail:
         thumbnail = get_fallback_thumb(video_id)
 
-    # PART B: CHECK DATABASE
     cached = await videos_col.find_one({"video_id": video_id})
-
     if cached and cached.get("catbox_link"):
         print(f"✅ Found in DB: {title}")
         return {
@@ -245,41 +349,32 @@ async def get_video(query: str, key: str):
             "duration": cached.get("duration", duration),
             "link": cached["catbox_link"],
             "id": video_id,
-            "thumbnail": cached.get("thumbnail", thumbnail), # ✅ Fixed
+            "thumbnail": cached.get("thumbnail", thumbnail),
             "cached": True,
             "response_time": f"{time.time()-start_time:.2f}s"
         }
 
-    # PART C: DOWNLOAD & SAVE (NEW SONG)
     print(f"⏳ Downloading: {title}")
 
-    # Save Metadata + Thumbnail immediately
     await videos_col.update_one(
         {"video_id": video_id}, 
-        {"$set": {
-            "video_id": video_id, 
-            "title": title, 
-            "duration": duration,
-            "thumbnail": thumbnail # ✅ Saving to DB
-        }}, 
+        {"$set": {"video_id": video_id, "title": title, "duration": duration, "thumbnail": thumbnail}}, 
         upsert=True
     )
 
     file_path = await asyncio.to_thread(auto_download_video, video_id)
-    if not file_path: return {"status": 500, "error": "Download Failed"}
+    if not file_path: return {"status": 500, "error": "Download Failed / Proxies Exhausted"}
 
     link = await asyncio.to_thread(upload_catbox, file_path)
     if os.path.exists(file_path): os.remove(file_path)
 
     if not link: return {"status": 500, "error": "Upload Failed"}
 
-    # Update DB
     await videos_col.update_one(
         {"video_id": video_id},
         {"$set": {"catbox_link": link, "cached_at": datetime.datetime.now()}}
     )
 
-    # 📢 SEND TELEGRAM LOG (Background Task)
     asyncio.create_task(asyncio.to_thread(send_telegram_log, title, duration, link, video_id))
 
     return {
@@ -288,11 +383,14 @@ async def get_video(query: str, key: str):
         "duration": duration,
         "link": link,
         "id": video_id,
-        "thumbnail": thumbnail, # ✅ Returned
+        "thumbnail": thumbnail,
         "cached": False,
         "response_time": f"{time.time()-start_time:.2f}s"
     }
 
 if __name__ == "__main__":
     import uvicorn
+    # Initial fetch
+    if USE_PROXY: fetch_proxies()
     uvicorn.run(app, host="0.0.0.0", port=8000)
+        

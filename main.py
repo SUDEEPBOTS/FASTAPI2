@@ -2,197 +2,244 @@ import os
 import time
 import datetime
 import requests
+import re
 import asyncio
 import uuid
 from fastapi import FastAPI
 from motor.motor_asyncio import AsyncIOMotorClient
 import config
-import urllib3
 
-# SSL Warnings disable taaki terminal saaf rahe
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-app = FastAPI(title="⚡ Sudeep API (Sumit API + Catbox Edition)")
+app = FastAPI(title="⚡ Sudeep API (YouTube Meta + Saavn File + Catbox)")
 
 # ─────────────────────────────
-# DATABASE & CONFIG
+# DATABASE
 # ─────────────────────────────
-if not config.MONGO_DB_URI:
-    print("⚠️ MONGO_DB_URI not found.")
-
 mongo = AsyncIOMotorClient(config.MONGO_DB_URI)
-db = mongo["MusicAPI_DB_Final"]
-videos_col = db["videos_cache"]
+db = mongo["MusicAPI_DB12"]
+
+videos_col = db["videos_cacht"]   # same old collection
 keys_col = db["api_users"]
 
 CATBOX_UPLOAD = "https://catbox.moe/user/api.php"
+SAAVN_BASE = "https://saavn.sumit.co"
 
 # ─────────────────────────────
-# 🔗 HELPERS
+# 🔑 KEY ROTATION (YouTube Metadata)
 # ─────────────────────────────
-def format_duration(seconds):
-    try:
-        m, s = divmod(int(seconds), 60)
-        return f"{m}:{s:02d}"
-    except: return "0:00"
-
-# YouTube Key Rotation (For Metadata/Thumbnail)
 current_key_index = 0
+
 def get_next_key():
     global current_key_index
     keys = config.YOUTUBE_API_KEYS
-    if not keys: return None
+    if not keys:
+        return None
     key = keys[current_key_index]
     current_key_index = (current_key_index + 1) % len(keys)
     return key
 
-def send_telegram_log(title, duration, link, vid_id):
-    if not config.BOT_TOKEN: return
+def format_duration(seconds):
     try:
-        msg = (f"🍫 **ɴᴇᴡ sᴏɴɢ (Sumit API)**\n\n"
-               f"🫶 **ᴛɪᴛʟᴇ:** {title}\n"
-               f"⏱ **ᴅᴜʀᴀᴛɪᴏɴ:** {duration}\n"
-               f"🛡️ **ɪᴅ:** `{vid_id}`\n"
-               f"👀 [ʟɪɴᴋ]({link})\n\n"
-               f"🍭 @Kaito_3_2")
-        requests.post(f"https://api.telegram.org/bot{config.BOT_TOKEN}/sendMessage",
-                      data={"chat_id": config.LOGGER_ID, "text": msg, "parse_mode": "Markdown"})
-    except: pass
+        seconds = int(seconds)
+        m, s = divmod(seconds, 60)
+        return f"{m}:{s:02d}"
+    except:
+        return "0:00"
 
 # ─────────────────────────────
-# 🔥 STEP 1: YOUTUBE METADATA
+# 🔥 Step 1: YouTube API (Metadata only)
 # ─────────────────────────────
 def get_youtube_metadata(query):
     for _ in range(3):
         api_key = get_next_key()
-        if not api_key: break
+        if not api_key:
+            break
+
         url = "https://www.googleapis.com/youtube/v3/search"
-        params = {"part": "snippet", "q": query, "type": "video", "maxResults": 1, "key": api_key}
+        params = {
+            "part": "snippet",
+            "q": query,
+            "type": "video",
+            "maxResults": 1,
+            "key": api_key
+        }
+
         try:
-            resp = requests.get(url, params=params, timeout=5).json()
-            if "items" in resp and len(resp["items"]) > 0:
-                item = resp["items"][0]
-                return {"id": item["id"]["videoId"], "title": item["snippet"]["title"], "thumbnail": item["snippet"]["thumbnails"]["high"]["url"]}
-        except: continue
+            resp = requests.get(url, params=params, timeout=7)
+            data = resp.json()
+
+            if "error" in data:
+                continue
+
+            items = data.get("items", [])
+            if not items:
+                continue
+
+            item = items[0]
+            return {
+                "id": item["id"]["videoId"],
+                "title": item["snippet"]["title"],
+                "thumbnail": item["snippet"]["thumbnails"]["high"]["url"]
+            }
+        except:
+            continue
+
     return None
 
 # ─────────────────────────────
-# 🔥 STEP 2: SUMIT API (DIRECT AUDIO) 🎵
+# 🔥 Step 2: Saavn search -> direct download url (320kbps)
 # ─────────────────────────────
-def get_audio_from_sumit(song_title):
-    """
-    Directly fetches working high-quality links from saavn.sumit.co
-    """
-    print(f"🎵 Searching Sumit API: {song_title}")
-    try:
-        # Search API Call
-        url = f"https://saavn.sumit.co/api/search/songs?query={song_title}&limit=1"
-        resp = requests.get(url, timeout=10).json()
+def saavn_search_top(query: str):
+    url = f"{SAAVN_BASE}/api/search/songs"
+    r = requests.get(url, params={"query": query}, timeout=10)
+    return r.json()
 
-        if resp.get("success") and resp.get("data") and resp["data"]["results"]:
-            song = resp["data"]["results"][0]
-            
-            # downloadUrl list mein aakhri link hamesha best quality (320kbps) hota hai
-            download_urls = song.get("downloadUrl", [])
-            if not download_urls: return None
-            
-            final_link = download_urls[-1]["url"] # 320kbps verified URL
-            
-            # Extra Check: Verifying Link Status
-            r = requests.head(final_link, timeout=5)
-            if r.status_code == 200:
-                return {
-                    "link": final_link, 
-                    "title": song.get("name"), 
-                    "duration": format_duration(song.get("duration", 0))
-                }
-    except Exception as e:
-        print(f"❌ API Error: {e}")
-    return None
+def pick_best_download(song_obj: dict):
+    dls = song_obj.get("downloadUrl", [])
+    if not dls:
+        return None
+
+    for q in ["320kbps", "160kbps", "96kbps", "48kbps", "12kbps"]:
+        for item in dls:
+            if item.get("quality") == q:
+                return item.get("url")
+
+    return dls[-1].get("url")
 
 # ─────────────────────────────
-# 🔥 STEP 3: BRIDGE (CATBOX)
+# 🔥 Step 3: Download file -> Upload Catbox
 # ─────────────────────────────
-def bridge_to_catbox(jio_url):
-    temp_file = f"/tmp/{uuid.uuid4()}.m4a"
+def bridge_to_catbox(file_url: str):
+    tmp_name = f"/tmp/{uuid.uuid4()}.mp4"  # saavn audio usually mp4/aac
     try:
-        print("📥 Downloading Audio...")
-        with requests.get(jio_url, stream=True, timeout=30, verify=False) as r:
+        with requests.get(file_url, stream=True, timeout=60) as r:
             r.raise_for_status()
-            with open(temp_file, 'wb') as f:
+            with open(tmp_name, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        
-        print("📤 Uploading to Catbox...")
-        with open(temp_file, "rb") as f:
-            r = requests.post(CATBOX_UPLOAD, data={"reqtype": "fileupload"}, files={"fileToUpload": f}, timeout=120)
-        
-        os.remove(temp_file)
-        if r.status_code == 200 and r.text.startswith("http"):
-            return r.text.strip()
-    except:
-        if os.path.exists(temp_file): os.remove(temp_file)
-    return None
+                    if chunk:
+                        f.write(chunk)
+
+        with open(tmp_name, "rb") as f:
+            up = requests.post(
+                CATBOX_UPLOAD,
+                data={"reqtype": "fileupload"},
+                files={"fileToUpload": f},
+                timeout=120
+            )
+
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+
+        if up.status_code == 200 and up.text.startswith("http"):
+            return up.text.strip()
+
+        return None
+
+    except Exception as e:
+        print("❌ Bridge Error:", e)
+        try:
+            if os.path.exists(tmp_name):
+                os.remove(tmp_name)
+        except:
+            pass
+        return None
 
 # ─────────────────────────────
-# 🚀 MAIN ROUTE
+# 🔐 AUTH CHECK
+# ─────────────────────────────
+async def verify_and_count(key: str):
+    doc = await keys_col.find_one({"api_key": key})
+    if not doc or not doc.get("active", True):
+        return False, "Invalid Key"
+    await keys_col.update_one({"api_key": key}, {"$inc": {"total_usage": 1}})
+    return True, None
+
+# ─────────────────────────────
+# 🚀 MAIN API
 # ─────────────────────────────
 @app.get("/getvideo")
 async def get_video(query: str, key: str):
     start_time = time.time()
 
-    # Auth Check
-    doc = await keys_col.find_one({"api_key": key})
-    if not doc or not doc.get("active", True): return {"status": 403, "error": "Invalid Key"}
-    await keys_col.update_one({"api_key": key}, {"$inc": {"total_usage": 1}})
+    # 1) Auth
+    ok, err = await verify_and_count(key)
+    if not ok:
+        return {"status": 403, "error": err}
 
-    # 1. YouTube Metadata
+    # 2) YouTube metadata
     yt_data = await asyncio.to_thread(get_youtube_metadata, query)
-    if not yt_data: return {"status": 404, "error": "Not Found on YouTube"}
-    
-    video_id = yt_data["id"]
+    if not yt_data:
+        return {"status": 404, "error": "Not found on YouTube (metadata)"}
 
-    # 2. DB Check (Cache)
+    video_id = yt_data["id"]
+    title = yt_data["title"]
+    thumbnail = yt_data["thumbnail"]
+
+    # 3) Cache check by video_id (old songs will return ✅)
     cached = await videos_col.find_one({"video_id": video_id})
     if cached and cached.get("catbox_link"):
-        return {"status": 200, "title": cached["title"], "link": cached["catbox_link"], "id": video_id, "thumbnail": yt_data["thumbnail"], "duration": cached["duration"], "cached": True}
+        return {
+            "status": 200,
+            "title": cached.get("title", title),
+            "duration": cached.get("duration", "0:00"),
+            "link": cached["catbox_link"],
+            "id": video_id,
+            "thumbnail": cached.get("thumbnail", thumbnail),
+            "cached": True,
+            "response_time": f"{time.time()-start_time:.2f}s"
+        }
 
-    # 3. Get Audio via Sumit API (One-Step Process) 🚀
-    # Hum seedha original query bhej rahe hain kyunki Sumit API smart hai
-    audio_data = await asyncio.to_thread(get_audio_from_sumit, query)
-    
-    # Fallback: Agar pehla fail ho toh YouTube title try karo
-    if not audio_data:
-        audio_data = await asyncio.to_thread(get_audio_from_sumit, yt_data["title"])
+    # 4) Saavn direct file url
+    saavn_data = await asyncio.to_thread(saavn_search_top, query)
+    results = (saavn_data.get("data") or {}).get("results") or []
+    if not results:
+        return {"status": 404, "error": "Not found on Saavn"}
 
-    if not audio_data: return {"status": 500, "error": "Audio Not Found on Server"}
+    top = results[0]
+    saavn_url = pick_best_download(top)
+    if not saavn_url:
+        return {"status": 500, "error": "Saavn downloadUrl missing"}
 
-    # 4. Bridge to Catbox (Permanent Storage)
-    catbox_link = await asyncio.to_thread(bridge_to_catbox, audio_data["link"])
-    if not catbox_link: return {"status": 500, "error": "Bridge Upload Failed"}
+    duration = format_duration(top.get("duration", 0))
 
-    # 5. Save to DB & Log
+    # 5) Download + upload catbox
+    catbox_link = await asyncio.to_thread(bridge_to_catbox, saavn_url)
+    if not catbox_link:
+        return {"status": 500, "error": "Catbox upload failed"}
+
+    # 6) Save DB
     await videos_col.update_one(
-        {"video_id": video_id}, 
+        {"video_id": video_id},
         {"$set": {
-            "title": audio_data["title"], 
-            "video_id": video_id, 
-            "catbox_link": catbox_link, 
-            "duration": audio_data["duration"], 
-            "thumbnail": yt_data["thumbnail"],
+            "title": title,
+            "video_id": video_id,
+            "catbox_link": catbox_link,
+            "thumbnail": thumbnail,
+            "duration": duration,
             "cached_at": datetime.datetime.now()
-        }}, upsert=True
+        }},
+        upsert=True
     )
-    asyncio.create_task(asyncio.to_thread(send_telegram_log, audio_data["title"], audio_data["duration"], catbox_link, video_id))
 
     return {
-        "status": 200, "title": audio_data["title"], "duration": audio_data["duration"],
-        "link": catbox_link, "id": video_id, "thumbnail": yt_data["thumbnail"],
-        "cached": False, "response_time": f"{time.time()-start_time:.2f}s"
+        "status": 200,
+        "title": title,
+        "duration": duration,
+        "link": catbox_link,
+        "id": video_id,
+        "thumbnail": thumbnail,
+        "cached": False,
+        "response_time": f"{time.time()-start_time:.2f}s"
     }
 
+# Stats & Home
+@app.get("/stats")
+async def get_stats():
+    total_songs = await videos_col.count_documents({})
+    return {"status": 200, "total_songs": total_songs}
+
 @app.api_route("/", methods=["GET", "HEAD"])
-async def home(): return {"status": "Running", "mode": "Sumit-API-V1"}
+async def home():
+    return {"status": "Running", "mode": "YouTube meta + Saavn file + Catbox"}
 
 if __name__ == "__main__":
     import uvicorn

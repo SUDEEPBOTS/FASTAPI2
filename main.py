@@ -1,198 +1,192 @@
 import os
 import time
 import datetime
-import subprocess
 import requests
 import re
 import asyncio
 import uuid
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from motor.motor_asyncio import AsyncIOMotorClient
-import yt_dlp
+import config  # Config file import ki (Jisme keys hain)
+
+app = FastAPI(title="⚡ Sudeep API (Hybrid: YT+Jio+Catbox)")
 
 # ─────────────────────────────
-# CONFIG
+# DATABASE & CONFIG
 # ─────────────────────────────
-MONGO_URL = os.getenv("MONGO_DB_URI")
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # ⚠️ Ye Zaroor Daalna Env Vars mein
-LOGGER_ID = -1003639584506          # ✅ Tera Logger Group ID
-
-if not MONGO_URL:
+if not config.MONGO_DB_URI:
     print("⚠️ MONGO_DB_URI not found.")
 
-CATBOX_UPLOAD = "https://catbox.moe/user/api.php"
-
-# COOKIES PATH CHECK
-COOKIES_PATHS = ["/app/cookies.txt", "./cookies.txt", "/etc/cookies.txt", "/tmp/cookies.txt"]
-COOKIES_PATH = None
-for path in COOKIES_PATHS:
-    if os.path.exists(path):
-        COOKIES_PATH = path
-        print(f"✅ Found cookies: {path}")
-        break
-
-app = FastAPI(title="⚡ Sudeep API (Logger + Thumb Fix)")
-
-# ─────────────────────────────
-# DATABASE
-# ─────────────────────────────
-mongo = AsyncIOMotorClient(MONGO_URL)
+mongo = AsyncIOMotorClient(config.MONGO_DB_URI)
 db = mongo["MusicAPI_DB12"]
 videos_col = db["videos_cacht"]
 keys_col = db["api_users"]
 queries_col = db["query_mapping"]
 
-# ─────────────────────────────
-# HELPER FUNCTIONS
-# ─────────────────────────────
-def extract_video_id(q: str):
-    if not q: return None
-    q = q.strip()
-    if len(q) == 11 and re.match(r'^[a-zA-Z0-9_-]{11}$', q): return q
-    patterns = [r'(?:v=|\/)([0-9A-Za-z_-]{11})', r'youtu\.be\/([0-9A-Za-z_-]{11})']
-    for pattern in patterns:
-        match = re.search(pattern, q)
-        if match: return match.group(1)
-    return None
+CATBOX_UPLOAD = "https://catbox.moe/user/api.php"
 
-def format_time(seconds):
-    try: return f"{int(seconds)//60}:{int(seconds)%60:02d}"
+# ─────────────────────────────
+# 🔑 KEY ROTATION LOGIC (For Google API)
+# ─────────────────────────────
+current_key_index = 0
+
+def get_next_key():
+    global current_key_index
+    keys = config.YOUTUBE_API_KEYS
+    if not keys: return None
+    key = keys[current_key_index]
+    # Next time ke liye index badha do (Loop mein)
+    current_key_index = (current_key_index + 1) % len(keys)
+    return key
+
+def format_duration(seconds):
+    try:
+        seconds = int(seconds)
+        m, s = divmod(seconds, 60)
+        return f"{m}:{s:02d}"
     except: return "0:00"
 
-# 📸 FORCE THUMBNAIL (Jugaad Function)
+# 📸 FALLBACK THUMBNAIL
 def get_fallback_thumb(vid_id):
     return f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg"
 
 # 📢 SEND LOG TO TELEGRAM
 def send_telegram_log(title, duration, link, vid_id):
-    if not BOT_TOKEN: return
+    if not config.BOT_TOKEN: return
     try:
         msg = (
-            f"🍫 **ɴᴇᴡ sᴏɴɢ**\n\n"
-            f"🫶 **ᴛɪᴛʟᴇ:** {title}\n\n"
+            f"🍫 **ɴᴇᴡ sᴏɴɢ (Hybrid)**\n\n"
+            f"🫶 **ᴛɪᴛʟᴇ:** {title}\n"
             f"⏱ **ᴅᴜʀᴀᴛɪᴏɴ:** {duration}\n"
             f"🛡️ **ɪᴅ:** `{vid_id}`\n"
             f"👀 [ʟɪɴᴋ]({link})\n\n"
             f"🍭 @Kaito_3_2"
         )
         requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data={"chat_id": LOGGER_ID, "text": msg, "parse_mode": "Markdown"}
+            f"https://api.telegram.org/bot{config.BOT_TOKEN}/sendMessage",
+            data={"chat_id": config.LOGGER_ID, "text": msg, "parse_mode": "Markdown"}
         )
     except Exception as e:
         print(f"❌ Logger Error: {e}")
 
-# 🔥 STEP 1: SEARCH ONLY (Metadata + Thumbnail)
-def get_video_id_only(query: str):
-    ydl_opts = {'quiet': True, 'skip_download': True, 'extract_flat': True, 'noplaylist': True}
-    if COOKIES_PATH: ydl_opts['cookiefile'] = COOKIES_PATH
+# ─────────────────────────────
+# 🔥 STEP 1: GOOGLE OFFICIAL API (Metadata Only)
+# ─────────────────────────────
+def get_youtube_metadata(query):
+    # 3 Baar Try karega (Alag keys se)
+    for _ in range(3):
+        api_key = get_next_key()
+        if not api_key: break
+        
+        print(f"🔑 Using Google Key: ...{api_key[-4:]}")
+        url = "https://www.googleapis.com/youtube/v3/search"
+        params = {"part": "snippet", "q": query, "type": "video", "maxResults": 1, "key": api_key}
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Case A: Direct ID/URL
-            direct_id = extract_video_id(query)
-            if direct_id:
-                info = ydl.extract_info(f"https://www.youtube.com/watch?v={direct_id}", download=False)
-                # 👇 Thumbnail Check
-                thumb = info.get('thumbnail') or get_fallback_thumb(direct_id)
-                return direct_id, info.get('title'), format_time(info.get('duration')), thumb
+        try:
+            resp = requests.get(url, params=params, timeout=5)
+            data = resp.json()
 
-            # Case B: Search Query
-            else:
-                info = ydl.extract_info(f"ytsearch1:{query}", download=False)
-                if info and 'entries' in info and info['entries']:
-                    v = info['entries'][0]
-                    vid_id = v['id']
-                    # 👇 Thumbnail Check
-                    thumb = v.get('thumbnail') or get_fallback_thumb(vid_id)
-                    return vid_id, v['title'], format_time(v.get('duration')), thumb
-    except Exception as e:
-        print(f"Search Error: {e}")
-    return None, None, None, None
+            # Agar Quota Error aaye
+            if "error" in data:
+                print(f"⚠️ Key Error: {data['error']['message']}")
+                continue # Agli key try karo
 
-def upload_catbox(path: str):
-    try:
-        with open(path, "rb") as f:
-            r = requests.post(CATBOX_UPLOAD, data={"reqtype": "fileupload"}, files={"fileToUpload": f}, timeout=120)
-        return r.text.strip() if r.status_code == 200 and r.text.startswith("http") else None
-    except: return None
-
-# 🔥 STEP 2: DOWNLOAD
-def auto_download_video(video_id: str):
-    random_name = str(uuid.uuid4())
-    out = f"/tmp/{random_name}.mp4"
-    if os.path.exists(out): os.remove(out)
-
-    cmd = [
-        "python", "-m", "yt_dlp", "--js-runtimes", "node", "--no-playlist", "--geo-bypass",
-        "-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--postprocessor-args", "VideoConvertor:-c:v libx264 -c:a aac -movflags +faststart",
-        "-o", out, f"https://www.youtube.com/watch?v={video_id}"
-    ]
-    if COOKIES_PATH: 
-        cmd.insert(3, "--cookies"); cmd.insert(4, COOKIES_PATH)
-
-    try:
-        subprocess.run(cmd, check=True, timeout=900)
-        return out if os.path.exists(out) and os.path.getsize(out) > 1024 else None
-    except: return None
+            if "items" in data and len(data["items"]) > 0:
+                item = data["items"][0]
+                return {
+                    "id": item["id"]["videoId"],
+                    "title": item["snippet"]["title"],
+                    # High Quality Thumbnail
+                    "thumbnail": item["snippet"]["thumbnails"]["high"]["url"]
+                }
+        except Exception as e:
+            print(f"❌ YouTube API Error: {e}")
+            continue
+            
+    return None
 
 # ─────────────────────────────
-# 🔥 AUTH CHECK + USAGE INCREMENT
+# 🔥 STEP 2: JIOSAAVN AUDIO FINDER
+# ─────────────────────────────
+def get_jiosaavn_direct_link(song_title):
+    print(f"🎵 Searching JioSaavn for: {song_title}")
+    try:
+        # Search
+        search_url = f"{config.JIOSAAVN_URL}/search?query={song_title}"
+        resp = requests.get(search_url, timeout=5).json()
+
+        if not resp.get("results"): return None
+
+        # ID nikalo aur Details maango
+        song_id = resp["results"][0]["id"]
+        details_url = f"{config.JIOSAAVN_URL}/song?id={song_id}"
+        details = requests.get(details_url, timeout=5).json()
+        
+        # Format Handle (List vs Dict)
+        target = details[0] if isinstance(details, list) else details
+
+        # 320kbps Link Priority
+        media_urls = target.get("media_urls", {})
+        link = media_urls.get("320_KBPS") or media_urls.get("160_KBPS") or target.get("media_url")
+        
+        dur_sec = target.get("duration", 0)
+        return {"link": link, "duration": format_duration(dur_sec)}
+
+    except Exception as e:
+        print(f"❌ JioSaavn Error: {e}")
+        return None
+
+# ─────────────────────────────
+# 🔥 STEP 3: BRIDGE (Download -> Upload to Catbox)
+# ─────────────────────────────
+def bridge_jio_to_catbox(jio_url):
+    """
+    JioSaavn se download karke Catbox pe upload karega
+    taaki Aria2 download kar sake.
+    """
+    random_name = str(uuid.uuid4())
+    temp_file = f"/tmp/{random_name}.m4a"
+    
+    try:
+        print("📥 Downloading Audio from JioSaavn...")
+        with requests.get(jio_url, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            with open(temp_file, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        
+        print("📤 Uploading to Catbox...")
+        if os.path.exists(temp_file):
+            with open(temp_file, "rb") as f:
+                r = requests.post(CATBOX_UPLOAD, data={"reqtype": "fileupload"}, files={"fileToUpload": f}, timeout=120)
+            
+            os.remove(temp_file) # Safai
+            
+            if r.status_code == 200 and r.text.startswith("http"):
+                return r.text.strip()
+            else:
+                print(f"❌ Catbox Error: {r.text}")
+                
+    except Exception as e:
+        print(f"❌ Bridge Error: {e}")
+        if os.path.exists(temp_file): os.remove(temp_file)
+    
+    return None
+
+# ─────────────────────────────
+# 🔐 AUTH CHECK
 # ─────────────────────────────
 async def verify_and_count(key: str):
     doc = await keys_col.find_one({"api_key": key})
-
     if not doc or not doc.get("active", True):
-        return False, "Invalid/Inactive Key"
-
-    today = str(datetime.date.today())
-    if doc.get("last_reset") != today:
-        await keys_col.update_one(
-            {"api_key": key},
-            {"$set": {"used_today": 0, "last_reset": today}}
-        )
-        doc["used_today"] = 0 
-
-    if doc.get("used_today", 0) >= doc.get("daily_limit", 100):
-        return False, "Daily Limit Exceeded"
-
-    await keys_col.update_one(
-        {"api_key": key},
-        {
-            "$inc": {"used_today": 1, "total_usage": 1},
-            "$set": {"last_used": time.time()}
-        }
-    )
+        return False, "Invalid Key"
+    
+    # Usage Count
+    await keys_col.update_one({"api_key": key}, {"$inc": {"total_usage": 1}})
     return True, None
 
 # ─────────────────────────────
-# 🔥 STATS & HOME
-# ─────────────────────────────
-@app.get("/stats")
-async def get_stats():
-    total_songs = await videos_col.count_documents({})
-    total_users = await keys_col.count_documents({})
-    return {"status": 200, "total_songs": total_songs, "total_users": total_users}
-
-@app.get("/user_stats")
-async def user_stats(target_key: str):
-    doc = await keys_col.find_one({"api_key": target_key})
-    if not doc: return {"status": 404, "error": "Key Not Found"}
-    return {
-        "user_id": doc.get("user_id"),
-        "used_today": doc.get("used_today", 0),
-        "total_usage": doc.get("total_usage", 0),
-        "daily_limit": doc.get("daily_limit", 100)
-    }
-
-@app.api_route("/", methods=["GET", "HEAD"])
-async def home():
-    return {"status": "Running", "version": "Logger + Thumb Fix"}
-
-# ─────────────────────────────
-# MAIN API LOGIC
+# 🚀 MAIN API LOGIC
 # ─────────────────────────────
 @app.get("/getvideo")
 async def get_video(query: str, key: str):
@@ -204,94 +198,89 @@ async def get_video(query: str, key: str):
 
     clean_query = query.strip().lower()
 
-    # PART A: IDENTIFY VIDEO
-    video_id = None
-    cached_q = await queries_col.find_one({"query": clean_query})
+    # 2. Get Metadata (Google API)
+    # Humein pehle ID chahiye taaki DB check kar sakein
+    print(f"🔍 Searching YouTube: {query}")
+    yt_data = await asyncio.to_thread(get_youtube_metadata, query)
+    
+    if not yt_data:
+        return {"status": 404, "error": "Song Not Found on YouTube"}
 
-    title = "Unknown"
-    duration = "0:00"
-    thumbnail = None
+    video_id = yt_data["id"]
+    title = yt_data["title"]
+    thumbnail = yt_data["thumbnail"]
 
-    if cached_q:
-        video_id = cached_q["video_id"]
-        meta = await videos_col.find_one({"video_id": video_id})
-        if meta:
-            title = meta.get("title", "Unknown")
-            duration = meta.get("duration", "0:00")
-            thumbnail = meta.get("thumbnail")
-
-    # Search if not in memory
-    if not video_id:
-        print(f"🔍 Searching: {query}")
-        video_id, title, duration, thumbnail = await asyncio.to_thread(get_video_id_only, query)
-
-        if video_id:
-             await queries_col.update_one({"query": clean_query}, {"$set": {"video_id": video_id}}, upsert=True)
-
-    if not video_id: return {"status": 404, "error": "Not Found"}
-
-    # 🔥 FINAL THUMBNAIL CHECK (Agar search se nahi mila toh manually banao)
-    if not thumbnail:
-        thumbnail = get_fallback_thumb(video_id)
-
-    # PART B: CHECK DATABASE
+    # 3. DB Check (Cache)
     cached = await videos_col.find_one({"video_id": video_id})
-
     if cached and cached.get("catbox_link"):
-        print(f"✅ Found in DB: {title}")
+        print(f"✅ Found in Cache: {title}")
         return {
             "status": 200,
             "title": cached.get("title", title),
-            "duration": cached.get("duration", duration),
+            "duration": cached.get("duration", "0:00"),
             "link": cached["catbox_link"],
             "id": video_id,
-            "thumbnail": cached.get("thumbnail", thumbnail), # ✅ Fixed
+            "thumbnail": cached.get("thumbnail", thumbnail),
             "cached": True,
             "response_time": f"{time.time()-start_time:.2f}s"
         }
 
-    # PART C: DOWNLOAD & SAVE (NEW SONG)
-    print(f"⏳ Downloading: {title}")
+    # 4. Fetch New Song (Hybrid Process)
+    print(f"⏳ New Song Detected: {title}")
+    
+    # Step A: JioSaavn se Link lo
+    jio_data = await asyncio.to_thread(get_jiosaavn_direct_link, title)
+    
+    if not jio_data or not jio_data["link"]:
+        return {"status": 500, "error": "Audio Not Found on JioSaavn"}
+    
+    # Step B: Download & Upload to Catbox
+    catbox_link = await asyncio.to_thread(bridge_jio_to_catbox, jio_data["link"])
+    
+    if not catbox_link:
+        return {"status": 500, "error": "Upload Failed (Bridge Error)"}
 
-    # Save Metadata + Thumbnail immediately
-    await videos_col.update_one(
-        {"video_id": video_id}, 
-        {"$set": {
-            "video_id": video_id, 
-            "title": title, 
-            "duration": duration,
-            "thumbnail": thumbnail # ✅ Saving to DB
-        }}, 
-        upsert=True
-    )
-
-    file_path = await asyncio.to_thread(auto_download_video, video_id)
-    if not file_path: return {"status": 500, "error": "Download Failed"}
-
-    link = await asyncio.to_thread(upload_catbox, file_path)
-    if os.path.exists(file_path): os.remove(file_path)
-
-    if not link: return {"status": 500, "error": "Upload Failed"}
-
-    # Update DB
+    # Step C: Save to DB
+    duration = jio_data["duration"]
     await videos_col.update_one(
         {"video_id": video_id},
-        {"$set": {"catbox_link": link, "cached_at": datetime.datetime.now()}}
+        {"$set": {
+            "title": title,
+            "video_id": video_id,
+            "catbox_link": catbox_link,
+            "thumbnail": thumbnail,
+            "duration": duration,
+            "cached_at": datetime.datetime.now()
+        }},
+        upsert=True
     )
+    
+    # Map Query for faster future searches
+    await queries_col.update_one({"query": clean_query}, {"$set": {"video_id": video_id}}, upsert=True)
 
-    # 📢 SEND TELEGRAM LOG (Background Task)
-    asyncio.create_task(asyncio.to_thread(send_telegram_log, title, duration, link, video_id))
+    # 📢 Log Send
+    asyncio.create_task(asyncio.to_thread(send_telegram_log, title, duration, catbox_link, video_id))
 
     return {
         "status": 200,
         "title": title,
         "duration": duration,
-        "link": link,
+        "link": catbox_link,
         "id": video_id,
-        "thumbnail": thumbnail, # ✅ Returned
+        "thumbnail": thumbnail,
         "cached": False,
         "response_time": f"{time.time()-start_time:.2f}s"
     }
+
+# Stats & Home (Same as before)
+@app.get("/stats")
+async def get_stats():
+    total_songs = await videos_col.count_documents({})
+    return {"status": 200, "total_songs": total_songs}
+
+@app.api_route("/", methods=["GET", "HEAD"])
+async def home():
+    return {"status": "Running", "mode": "Hybrid (Google+Jio+Catbox)"}
 
 if __name__ == "__main__":
     import uvicorn
